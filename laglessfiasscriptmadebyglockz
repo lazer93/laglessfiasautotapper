@@ -16,7 +16,7 @@ local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 --==================== FAST CONFIG ============================
-local MULTIPLIER  = 10        -- total taps per real tap
+local MULTIPLIER  = 30        -- total taps per real tap
 local BURST_COUNT = 4         -- how many of them are "some fast" taps
 local BURST_GAP   = 0.0015    -- gap between the fast burst taps
 local REPLAY_GAP  = 0.004     -- gap between the remaining taps
