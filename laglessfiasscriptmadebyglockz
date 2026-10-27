@@ -1,0 +1,390 @@
+--=============================================================
+--  TAP x10  —  MOBILE / iPAD  —  TOUCH ONLY
+--  • only listens to real taps (Enum.UserInputType.Touch)
+--  • replays each tap using touch events (SendTouchEvent), NOT mouse clicks
+--  • small draggable ⚡ button, tap to open/close panel
+--  • smooth top-RIGHT notification (lowered) on toggle
+--=============================================================
+
+local Players      = game:GetService("Players")
+local UIS          = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local VIM          = game:GetService("VirtualInputManager")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local MULTIPLIER  = 10        -- total taps per real tap
+local REPLAY_GAP  = 0.012     -- seconds between the extra taps
+local PRESS_GAP   = 0.006     -- Begin → End gap for each simulated tap
+local DEBOUNCE    = 0.05      -- ignore the same physical tap firing twice
+
+local enabled = false
+
+----------------------------------------------------------------
+-- ROOT GUI
+----------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name            = "TapX10"
+gui.ResetOnSpawn    = false
+gui.IgnoreGuiInset  = true
+gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder    = 9999
+gui.Parent          = playerGui
+
+----------------------------------------------------------------
+-- NOTIFICATIONS (top-RIGHT, lowered)
+----------------------------------------------------------------
+local NOTIF_WIDTH  = 232
+local NOTIF_MARGIN = 14
+local NOTIF_TOP    = 90   -- ← "a lil lowered" (was 14)
+
+local notifHolder = Instance.new("Frame")
+notifHolder.Name                   = "Notifications"
+notifHolder.AnchorPoint            = Vector2.new(1, 0)                        -- anchor to the right edge
+notifHolder.Position               = UDim2.new(1, -NOTIF_MARGIN, 0, NOTIF_TOP) -- top-right corner
+notifHolder.Size                   = UDim2.new(0, NOTIF_WIDTH, 0, 420)
+notifHolder.BackgroundTransparency = 1
+notifHolder.Parent                 = gui
+
+local notifLayout = Instance.new("UIListLayout")
+notifLayout.Padding = UDim.new(0, 8)
+notifLayout.Parent  = notifHolder
+
+local notifOrder = 0
+
+local function notify(text, isOn)
+	notifOrder += 1
+
+	local slot = Instance.new("Frame")
+	slot.Size                   = UDim2.new(1, 0, 0, 42)
+	slot.BackgroundTransparency = 1
+	slot.LayoutOrder            = notifOrder
+	slot.Parent                 = notifHolder
+
+	local card = Instance.new("CanvasGroup")
+	card.Size                   = UDim2.new(1, 0, 1, 0)
+	card.Position               = UDim2.new(0, 260, 0, 0)   -- starts off-screen to the RIGHT
+	card.BackgroundColor3       = Color3.fromRGB(24, 24, 31)
+	card.BackgroundTransparency = 0.05
+	card.GroupTransparency      = 1
+	card.Parent                 = slot
+
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 12)
+	c.Parent = card
+
+	local s = Instance.new("UIStroke")
+	s.Color        = Color3.fromRGB(70, 70, 88)
+	s.Thickness    = 1
+	s.Transparency = 0.45
+	s.Parent       = card
+
+	local dot = Instance.new("Frame")
+	dot.Size             = UDim2.new(0, 8, 0, 8)
+	dot.Position         = UDim2.new(0, 14, 0.5, -4)
+	dot.BorderSizePixel  = 0
+	dot.BackgroundColor3 = isOn and Color3.fromRGB(0, 220, 130) or Color3.fromRGB(255, 90, 90)
+	dot.Parent           = card
+
+	local dc = Instance.new("UICorner")
+	dc.CornerRadius = UDim.new(1, 0)
+	dc.Parent = dot
+
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Position              = UDim2.new(0, 32, 0, 0)
+	label.Size                  = UDim2.new(1, -44, 1, 0)
+	label.Font                  = Enum.Font.GothamMedium
+	label.TextSize              = 13
+	label.TextColor3            = Color3.fromRGB(240, 240, 246)
+	label.TextXAlignment        = Enum.TextXAlignment.Left
+	label.Text                  = text
+	label.Parent                = card
+
+	-- slide in from the right + fade in
+	TweenService:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+		Position          = UDim2.new(0, 0, 0, 0),
+		GroupTransparency = 0,
+	}):Play()
+
+	-- slide back out to the right + fade out
+	task.delay(2.2, function()
+		local out = TweenService:Create(card, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Position          = UDim2.new(0, 260, 0, 0),
+			GroupTransparency = 1,
+		})
+		out:Play()
+		out.Completed:Wait()
+		slot:Destroy()
+	end)
+end
+
+----------------------------------------------------------------
+-- SMALL ⚡ BUTTON
+----------------------------------------------------------------
+local bubble = Instance.new("TextButton")
+bubble.Name             = "Bubble"
+bubble.Size             = UDim2.new(0, 46, 0, 46)
+bubble.Position         = UDim2.new(0, 16, 0, 220)
+bubble.BackgroundColor3 = Color3.fromRGB(26, 26, 34)
+bubble.AutoButtonColor  = false
+bubble.BorderSizePixel  = 0
+bubble.Text             = "⚡"
+bubble.Font             = Enum.Font.GothamBold
+bubble.TextSize         = 20
+bubble.TextColor3       = Color3.fromRGB(255, 255, 255)
+bubble.ZIndex           = 10
+bubble.Parent           = gui
+
+local bc = Instance.new("UICorner")
+bc.CornerRadius = UDim.new(1, 0)
+bc.Parent = bubble
+
+local bs = Instance.new("UIStroke")
+bs.Color        = Color3.fromRGB(90, 90, 110)
+bs.Thickness    = 1.5
+bs.Transparency = 0.5
+bs.Parent       = bubble
+
+----------------------------------------------------------------
+-- PANEL
+----------------------------------------------------------------
+local panel = Instance.new("CanvasGroup")
+panel.Name                   = "Panel"
+panel.Size                   = UDim2.new(0, 190, 0, 80)
+panel.BackgroundColor3       = Color3.fromRGB(22, 22, 30)
+panel.BackgroundTransparency = 0.02
+panel.BorderSizePixel        = 0
+panel.GroupTransparency      = 1
+panel.Visible                = false
+panel.ZIndex                 = 9
+panel.Parent                 = gui
+
+local pc = Instance.new("UICorner")
+pc.CornerRadius = UDim.new(0, 14)
+pc.Parent = panel
+
+local ps = Instance.new("UIStroke")
+ps.Color        = Color3.fromRGB(65, 65, 82)
+ps.Thickness    = 1
+ps.Transparency = 0.4
+ps.Parent       = panel
+
+local pscale = Instance.new("UIScale")
+pscale.Scale = 0.9
+pscale.Parent = panel
+
+local blocker = Instance.new("TextButton")
+blocker.Size                   = UDim2.new(1, 0, 1, 0)
+blocker.BackgroundTransparency = 1
+blocker.Text                   = ""
+blocker.AutoButtonColor        = false
+blocker.ZIndex                 = 10
+blocker.Parent                 = panel
+
+local title = Instance.new("TextLabel")
+title.Position              = UDim2.new(0, 14, 0, 14)
+title.Size                  = UDim2.new(1, -90, 0, 18)
+title.BackgroundTransparency = 1
+title.Font                  = Enum.Font.GothamBold
+title.TextSize              = 14
+title.TextColor3            = Color3.fromRGB(240, 240, 246)
+title.TextXAlignment        = Enum.TextXAlignment.Left
+title.Text                  = "Tap Speed"
+title.ZIndex                = 11
+title.Parent                = panel
+
+local sub = Instance.new("TextLabel")
+sub.Position              = UDim2.new(0, 14, 0, 34)
+sub.Size                  = UDim2.new(1, -90, 0, 14)
+sub.BackgroundTransparency = 1
+sub.Font                  = Enum.Font.Gotham
+sub.TextSize              = 11
+sub.TextColor3            = Color3.fromRGB(150, 150, 168)
+sub.TextXAlignment        = Enum.TextXAlignment.Left
+sub.Text                  = "x" .. MULTIPLIER .. " per tap"
+sub.ZIndex                = 11
+sub.Parent                = panel
+
+local track = Instance.new("TextButton")
+track.Size             = UDim2.new(0, 52, 0, 28)
+track.Position         = UDim2.new(1, -66, 0.5, -14)
+track.BackgroundColor3 = Color3.fromRGB(58, 58, 72)
+track.AutoButtonColor  = false
+track.BorderSizePixel  = 0
+track.Text             = ""
+track.ZIndex           = 11
+track.Parent           = panel
+
+local tc = Instance.new("UICorner")
+tc.CornerRadius = UDim.new(1, 0)
+tc.Parent = track
+
+local knob = Instance.new("Frame")
+knob.Size             = UDim2.new(0, 22, 0, 22)
+knob.Position         = UDim2.new(0, 3, 0.5, -11)
+knob.BackgroundColor3 = Color3.fromRGB(235, 235, 240)
+knob.BorderSizePixel  = 0
+knob.ZIndex           = 12
+knob.Parent           = track
+
+local kc = Instance.new("UICorner")
+kc.CornerRadius = UDim.new(1, 0)
+kc.Parent = knob
+
+----------------------------------------------------------------
+-- HELPERS
+----------------------------------------------------------------
+local function syncPanel()
+	panel.Position = UDim2.new(
+		bubble.Position.X.Scale, bubble.Position.X.Offset,
+		bubble.Position.Y.Scale, bubble.Position.Y.Offset + 54
+	)
+end
+syncPanel()
+
+local function setEnabled(state)
+	enabled = state
+
+	local info = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+	TweenService:Create(track, info, {
+		BackgroundColor3 = state and Color3.fromRGB(0, 200, 120) or Color3.fromRGB(58, 58, 72),
+	}):Play()
+
+	TweenService:Create(knob, info, {
+		Position = state and UDim2.new(0, 27, 0.5, -11) or UDim2.new(0, 3, 0.5, -11),
+	}):Play()
+
+	bubble.TextColor3 = state and Color3.fromRGB(120, 255, 190) or Color3.fromRGB(255, 255, 255)
+
+	notify(state and "Tap Speed x" .. MULTIPLIER .. " — ON"
+	            or "Tap Speed x" .. MULTIPLIER .. " — OFF", state)
+end
+
+track.Activated:Connect(function()
+	setEnabled(not enabled)
+end)
+
+----------------------------------------------------------------
+-- OPEN / CLOSE PANEL
+----------------------------------------------------------------
+local panelOpen = false
+
+local function setPanel(open)
+	panelOpen = open
+	syncPanel()
+
+	if open then
+		panel.Visible = true
+		TweenService:Create(panel, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+			GroupTransparency = 0,
+		}):Play()
+		TweenService:Create(pscale, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Scale = 1,
+		}):Play()
+	else
+		TweenService:Create(panel, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			GroupTransparency = 1,
+		}):Play()
+		TweenService:Create(pscale, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Scale = 0.9,
+		}):Play()
+		task.delay(0.2, function()
+			if not panelOpen then panel.Visible = false end
+		end)
+	end
+end
+
+----------------------------------------------------------------
+-- DRAG + TAP ON THE ⚡ BUTTON  (touch only)
+----------------------------------------------------------------
+local dragging  = false
+local dragged   = false
+local dragStart = nil
+local startPos  = nil
+local activeTouch = nil
+
+bubble.InputBegan:Connect(function(input)
+	if input.UserInputType ~= Enum.UserInputType.Touch then return end
+	dragging     = true
+	dragged      = false
+	dragStart    = input.Position
+	startPos     = bubble.Position
+	activeTouch  = input
+end)
+
+UIS.InputChanged:Connect(function(input)
+	if not dragging then return end
+	if input.UserInputType ~= Enum.UserInputType.Touch then return end
+	if activeTouch and input ~= activeTouch then return end
+
+	local delta = input.Position - dragStart
+	if not dragged and delta.Magnitude > 8 then
+		dragged = true
+	end
+	if dragged then
+		bubble.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+		syncPanel()
+	end
+end)
+
+UIS.InputEnded:Connect(function(input)
+	if not dragging then return end
+	if input.UserInputType ~= Enum.UserInputType.Touch then return end
+	if activeTouch and input ~= activeTouch then return end
+
+	dragging    = false
+	activeTouch = nil
+	if not dragged then
+		setPanel(not panelOpen)
+	end
+end)
+
+----------------------------------------------------------------
+-- TOUCH-ONLY 10x REPLAY
+----------------------------------------------------------------
+local function sendTouchTap(x, y)
+	pcall(function()
+		VIM:SendTouchEvent(x, y, Enum.UserInputState.Begin, false, game)
+		task.wait(PRESS_GAP)
+		VIM:SendTouchEvent(x, y, Enum.UserInputState.End, false, game)
+	end)
+end
+
+local function pointInside(obj, x, y)
+	if not obj.Visible then return false end
+	local p, s = obj.AbsolutePosition, obj.AbsoluteSize
+	return x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y
+end
+
+local lastTap = 0
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+	if not enabled then return end
+	if input.UserInputType ~= Enum.UserInputType.Touch then return end
+	if gameProcessed then return end
+
+	local now = os.clock()
+	if now - lastTap < DEBOUNCE then return end
+	lastTap = now
+
+	local x, y = input.Position.X, input.Position.Y
+
+	if pointInside(bubble, x, y) then return end
+	if panelOpen and pointInside(panel, x, y) then return end
+
+	task.spawn(function()
+		for i = 2, MULTIPLIER do
+			if not enabled then break end
+			sendTouchTap(x, y)
+			task.wait(REPLAY_GAP)
+		end
+	end)
+end)
+
+notify("Tap Speed loaded — tap ⚡", true)
